@@ -31,7 +31,7 @@ func (s *Session) Save(path string) (err error) {
 	return nil
 }
 
-func LoadSession(path string) (sess *Session, err error) {
+func LoadSession(path string) (*Session, error) {
 	f, err := os.Open(path)
 	if os.IsNotExist(err) {
 		return nil, merry.New("no session data")
@@ -41,8 +41,9 @@ func LoadSession(path string) (sess *Session, err error) {
 	}
 	defer f.Close()
 
-	if err := json.NewDecoder(f).Decode(sess); err != nil {
+	var sess Session
+	if err := json.NewDecoder(f).Decode(&sess); err != nil {
 		return nil, merry.Wrap(err)
 	}
-	return sess, nil
+	return &sess, nil
 }
