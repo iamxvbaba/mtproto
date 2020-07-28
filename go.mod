@@ -1,4 +1,4 @@
-module github.com/NanakoL/mtproto
+module github.com/iamxvbaba/mtproto
 
 go 1.14
 

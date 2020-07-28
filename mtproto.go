@@ -211,6 +211,7 @@ func (m *MTProto) initConnection() error {
 	if err != nil {
 		return merry.Wrap(err)
 	}
+	//使用最轻量的协议 Abridged
 	_, err = m.conn.Write([]byte{0xef})
 	if err != nil {
 		return merry.Wrap(err)
