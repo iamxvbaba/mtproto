@@ -257,7 +257,7 @@ func (m *MTProto) Connect() error {
 	go m.pingRoutine()          // starting keepalive pinging
 
 	err := m.initConfig()
-	if err == nil {
+	if err != nil {
 		log.Error(err, "failed to get config")
 	}
 
