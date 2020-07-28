@@ -459,11 +459,11 @@ func (m *MTProto) decodeMessage(dbuf *DecodeBuf, reqMsg TLReq) (r TL) {
 				r = m.decodeMessage(dbuf, req)
 			} else {
 				r = m.decodeMessage(dbuf, nil)
-				m.log.Warn("got RPC result (%T) not-a-request message #%d #T", r, requestID, packet.msg)
+				log.Warn("got RPC result (%T) not-a-request message #%d #T", r, requestID, packet.msg)
 			}
 		} else {
 			r = m.decodeMessage(dbuf, nil)
-			m.log.Warn("got RPC result (%T) for unknown message #%d", r, requestID)
+			log.Warn("got RPC result (%T) for unknown message #%d", r, requestID)
 		}
 		r = TL_rpc_result{requestID, r}
 

@@ -17,7 +17,7 @@ func (m *MTProto) send(packet *packetToSend) error {
 	if packet.msgID == 0 {
 		packet.msgID = GenerateMessageId()
 	}
-	m.log.Message(false, packet.msg, packet.msgID)
+	log.Message(false, packet.msg, packet.msgID)
 	obj := packet.msg.encode()
 
 	x := NewEncodeBuf(256)
@@ -190,7 +190,7 @@ func (m *MTProto) read() (TL, error) {
 		return nil, merry.Errorf("Wrong bits of message_id: %d", mod)
 	}
 
-	m.log.Message(true, data, 0)
+	log.Message(true, data, 0)
 	return data, nil
 }
 

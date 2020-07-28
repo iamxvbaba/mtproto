@@ -49,7 +49,7 @@ func (l Logger) Info(msg string, args ...interface{}) {
 }
 
 func (l Logger) Debug(msg string, args ...interface{}) {
-	logrus.Debugf("\033[90m" + msg + "\033[0m", args...)
+	logrus.Debugf("\033[90m"+msg+"\033[0m", args...)
 }
 
 func (l Logger) Message(isIncoming bool, message TL, id int64) {

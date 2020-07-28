@@ -6,8 +6,6 @@ import (
 	"github.com/ansel1/merry"
 	"math/rand"
 	"net"
-	"os"
-	"path/filepath"
 	"runtime"
 	"sync"
 	"time"
@@ -21,16 +19,7 @@ import (
 
 const RoutinesCount = 4
 
-var ErrNoSessionData = merry.New("no session data")
-
-type SessionInfo struct {
-	DcID        int32  `json:"dc_id"`
-	AuthKey     []byte `json:"auth_key"`
-	AuthKeyHash []byte `json:"auth_key_hash"`
-	ServerSalt  int64  `json:"server_salt"`
-	Addr        string `json:"addr"`
-	sessionId   int64
-}
+var log = new(Logger)
 
 type AppConfig struct {
 	AppID          int32
@@ -44,12 +33,10 @@ type AppConfig struct {
 }
 
 type MTProto struct {
-	sessionStore SessionStore
-	session      *SessionInfo
-	appCfg       *AppConfig
-	connDialer   proxy.Dialer
-	conn         net.Conn
-	log          *Logger
+	session    *Session
+	appCfg     *AppConfig
+	connDialer proxy.Dialer
+	conn       net.Conn
 
 	// Two queues here.
 	// First (external) has limited size and contains external requests.
@@ -91,66 +78,44 @@ func newPacket(msg TL, resp chan TL) *packetToSend {
 }
 
 type MTParams struct {
-	LogHandler *Logger
-	AppID      int32
-	AppHash    string
 	AppConfig  *AppConfig
 	ConnDialer proxy.Dialer
-	SessStore  SessionStore
-	Session    *SessionInfo
+	Session    *Session
 }
 
-func NewMTProto(appID int32, appHash string) *MTProto {
-	return NewMTProtoExt(MTParams{AppID: appID, AppHash: appHash})
-}
-
-func NewMTProtoExt(params MTParams) *MTProto {
-	if params.LogHandler == nil {
-		params.LogHandler = new(Logger)
+func NewAppConfig(appID int32, appHash string) *AppConfig {
+	if appID == 0 {
+		appID = int32(48841)
 	}
+	if appHash == "" {
+		appHash = "3151c01673d412c18c055f089128be50"
+	}
+	config := &AppConfig{
+		AppID:          appID,
+		AppHash:        appHash,
+		AppVersion:     "0.0.1",
+		DeviceModel:    "Unknown",
+		SystemVersion:  runtime.GOOS + "/" + runtime.GOARCH,
+		SystemLangCode: "en",
+		LangPack:       "",
+		LangCode:       "en",
+	}
+	return config
+}
 
+func NewMTProto(params MTParams) *MTProto {
 	if params.AppConfig == nil {
-		params.AppConfig = &AppConfig{
-			AppID:          0,
-			AppHash:        "",
-			AppVersion:     "0.0.1",
-			DeviceModel:    "Unknown",
-			SystemVersion:  runtime.GOOS + "/" + runtime.GOARCH,
-			SystemLangCode: "en",
-			LangPack:       "",
-			LangCode:       "en",
-		}
-	}
-
-	if params.AppID != 0 {
-		params.AppConfig.AppID = params.AppID
-	}
-	if params.AppHash != "" {
-		params.AppConfig.AppHash = params.AppHash
+		params.AppConfig = NewAppConfig(0, "")
 	}
 
 	if params.ConnDialer == nil {
 		params.ConnDialer = &net.Dialer{}
 	}
 
-	if params.SessStore == nil {
-		var exPath string
-		ex, err := os.Executable()
-		if err != nil {
-			params.LogHandler.Error(err, "failed to get executable file path")
-			exPath = "."
-		} else {
-			exPath = filepath.Dir(ex)
-		}
-		params.SessStore = &SessFileStore{exPath + "/session.json"}
-	}
-
 	m := &MTProto{
-		sessionStore: params.SessStore,
-		session:      params.Session,
-		connDialer:   params.ConnDialer,
-		appCfg:       params.AppConfig,
-		log:          params.LogHandler,
+		session:    params.Session,
+		connDialer: params.ConnDialer,
+		appCfg:     params.AppConfig,
 
 		extSendQueue: make(chan *packetToSend, 64),
 		sendQueue:    make(chan *packetToSend, 1024),
@@ -177,19 +142,12 @@ func (m *MTProto) InitSessAndConnect() error {
 }
 
 func (m *MTProto) InitSession(sessEncrIsReady bool) error {
-	if m.session == nil {
-		m.session = &SessionInfo{}
-		err := m.sessionStore.Load(m.session)
-		if merry.Is(err, ErrNoSessionData) { //no data
-			m.session.Addr = "149.154.167.50:443" //"149.154.167.40"
-			m.encryptionReady = false
-		} else if err == nil { //got saved session
-			m.encryptionReady = true
-		} else {
-			return merry.Wrap(err)
-		}
-	} else {
+	if m.session != nil {
 		m.encryptionReady = sessEncrIsReady
+	} else {
+		m.encryptionReady = false
+		// Create New Session
+		m.session = &Session{Addr: "149.154.167.50:443"}
 	}
 
 	rand.Seed(time.Now().UnixNano())
@@ -197,15 +155,9 @@ func (m *MTProto) InitSession(sessEncrIsReady bool) error {
 	return nil
 }
 
-func (m *MTProto) CopySession() *SessionInfo {
+func (m *MTProto) CopySession() *Session {
 	sess := *m.session
 	return &sess
-}
-
-func (m *MTProto) SaveSessionLogged() {
-	if err := m.sessionStore.Save(m.session); err != nil {
-		m.log.Error(err, "failed to save session data")
-	}
 }
 
 func (m *MTProto) DCAddr(dcID int32, ipv6 bool) (string, bool) {
@@ -221,8 +173,39 @@ func (m *MTProto) SetEventsHandler(handler func(TL)) {
 	m.handleEvent = handler
 }
 
-func (m *MTProto) initConection() error {
-	m.log.Info("connecting to DC %d (%s)...", m.session.DcID, m.session.Addr)
+func (m *MTProto) initConfig() error {
+
+	// getting connection configs
+	log.Debug("connecting: getting config...")
+	x := m.SendSyncRetry(TL_invokeWithLayer{
+		TL_Layer,
+		TL_initConnection{
+			Flags:          0,
+			ApiID:          m.appCfg.AppID,
+			DeviceModel:    m.appCfg.DeviceModel,
+			SystemVersion:  m.appCfg.SystemVersion,
+			AppVersion:     m.appCfg.AppVersion,
+			SystemLangCode: m.appCfg.SystemLangCode,
+			LangPack:       m.appCfg.LangPack,
+			LangCode:       m.appCfg.LangCode,
+			Proxy:          nil, //flagged
+			Query:          TL_help_getConfig{},
+		},
+	}, 5, 10, 10)
+	if cfg, ok := x.(TL_config); ok {
+		m.session.DcID = cfg.ThisDc
+		for _, v := range cfg.DcOptions {
+			v := v.(TL_dcOption)
+			m.dcOptions = append(m.dcOptions, &v)
+		}
+	} else {
+		return WrongRespError(x)
+	}
+	return nil
+}
+
+func (m *MTProto) initConnection() error {
+	log.Info("connecting to DC %d (%s)...", m.session.DcID, m.session.Addr)
 	var err error
 	m.conn, err = m.connDialer.Dial("tcp", m.session.Addr)
 	if err != nil {
@@ -238,77 +221,54 @@ func (m *MTProto) initConection() error {
 		if err = m.makeAuthKey(); err != nil {
 			return merry.Wrap(err)
 		}
-		if err := m.sessionStore.Save(m.session); err != nil {
-			return merry.Wrap(err)
-		}
 		m.encryptionReady = true
-	}
-
-	// getting connection configs
-	m.log.Debug("connecting: getting config...")
-	x, err := m.sendAndReadDirect(TL_invokeWithLayer{
-		TL_Layer,
-		TL_initConnection{
-			Flags:          0,
-			ApiID:          m.appCfg.AppID,
-			DeviceModel:    m.appCfg.DeviceModel,
-			SystemVersion:  m.appCfg.SystemVersion,
-			AppVersion:     m.appCfg.AppVersion,
-			SystemLangCode: m.appCfg.SystemLangCode,
-			LangPack:       m.appCfg.LangPack,
-			LangCode:       m.appCfg.LangCode,
-			Proxy:          nil, //flagged
-			Query:          TL_help_getConfig{},
-		},
-	})
-	if err != nil {
-		return merry.Wrap(err)
-	}
-	if cfg, ok := x.(TL_config); ok {
-		m.session.DcID = cfg.ThisDc
-		for _, v := range cfg.DcOptions {
-			v := v.(TL_dcOption)
-			m.dcOptions = append(m.dcOptions, &v)
-		}
-	} else {
-		return WrongRespError(x)
 	}
 	return nil
 }
+
 func (m *MTProto) Connect() error {
 	if !m.connectSemaphore.TryAcquire(1) {
-		m.log.Info("connection already in progress, aborting")
+		log.Info("connection already in progress, aborting")
 		return nil
 	}
 	defer m.connectSemaphore.Release(1)
 
-	var err error
-	for i := 4; i >= 0; i-- {
-		err = m.initConection()
+	m.routinesWG.Add(4)
+
+	retry := 0
+	for {
+		err := m.initConnection()
 		if err == nil {
 			break
 		}
-		m.log.Error(err, "failed to connect")
-		m.log.Info("trying to connect one more time (%d)", i)
+		log.Warn("failed to connect, Retrying (%d)", retry)
+		if retry > 10 {
+			log.Error(err, "failed to connect, Abort.")
+		}
+		retry += 1
 		time.Sleep(1)
 	}
 
 	// starting goroutines
-	m.log.Debug("connecting: starting routines...")
-	m.routinesWG.Add(4)
+	log.Debug("connecting: starting routines...")
 	go m.sendRoutine()
 	go m.readRoutine()
-	go m.queueTransferRoutine() // straintg messages transfer from external to internal queue
+	go m.queueTransferRoutine() // starting messages transfer from external to internal queue
 	go m.pingRoutine()          // starting keepalive pinging
 
-	m.log.Info("connected to DC %d (%s)...", m.session.DcID, m.session.Addr)
+	err := m.initConfig()
+	if err == nil {
+		log.Error(err, "failed to get config")
+	}
+
+	log.Info("connected to DC %d (%s)...", m.session.DcID, m.session.Addr)
 	return nil
 }
 
 func (m *MTProto) reconnectLogged() {
-	m.log.Info("reconnecting...")
+	log.Info("reconnecting...")
 	if !m.reconnSemaphore.TryAcquire(1) {
-		m.log.Info("reconnection already in progress, aborting")
+		log.Info("reconnection already in progress, aborting")
 		return
 	}
 	defer func() { m.reconnSemaphore.Release(1) }()
@@ -318,8 +278,8 @@ func (m *MTProto) reconnectLogged() {
 		if err == nil {
 			return
 		}
-		m.log.Error(err, "failed to reconnect")
-		m.log.Info("retrying in 5 seconds")
+		log.Error(err, "failed to reconnect")
+		log.Info("retrying in 5 seconds")
 		time.Sleep(5 * time.Second)
 		// and trying to reconnect again
 	}
@@ -330,10 +290,10 @@ func (m *MTProto) Reconnect() error {
 }
 
 func (m *MTProto) reconnect(newDcID int32) error {
-	m.log.Info("reconnecting: DC %d -> %d", m.session.DcID, newDcID)
+	log.Info("reconnecting: DC %d -> %d", m.session.DcID, newDcID)
 
 	// stopping routines
-	m.log.Debug("stopping routines...")
+	log.Debug("stopping routines...")
 	for i := 0; i < RoutinesCount; i++ {
 		m.routinesStop <- struct{}{}
 	}
@@ -346,9 +306,9 @@ func (m *MTProto) reconnect(newDcID int32) error {
 	}
 
 	// waiting for all routines to stop
-	m.log.Debug("waiting for routines...")
+	log.Debug("waiting for routines...")
 	m.routinesWG.Wait()
-	m.log.Debug("done stopping routines...")
+	log.Debug("done stopping routines...")
 
 	// removing unused stop signals (if any)
 	for empty := false; !empty; {
@@ -367,12 +327,13 @@ func (m *MTProto) reconnect(newDcID int32) error {
 		pendingIDs = append(pendingIDs, id)
 	}
 	m.mutex.Unlock()
-	m.log.Debug("found %d pending packet(s)", len(pendingIDs))
+	log.Debug("found %d pending packet(s)", len(pendingIDs))
 
 	if newDcID != 0 {
 		// renewing connection
 		if newDcID != m.session.DcID {
 			m.encryptionReady = false //TODO: export auth here (if authed)
+
 			//https://github.com/sochix/TLSharp/blob/0940d3d982e9c22adac96b6c81a435403802899a/TLSharp.Core/TelegramClient.cs#L84
 		}
 		newDcAddr, ok := m.DCAddr(newDcID, false)
@@ -406,13 +367,13 @@ func (m *MTProto) reconnect(newDcID int32) error {
 		m.mutex.Unlock()
 	}
 
-	m.log.Info("reconnected to DC %d (%s)", m.session.DcID, m.session.Addr)
+	log.Info("reconnected to DC %d (%s)", m.session.DcID, m.session.Addr)
 	return nil
 }
 
 func (m *MTProto) NewConnection(dcID int32) (*MTProto, error) {
 	session := m.CopySession()
-	m.log.Info("making new connection to DC %d (current: %d)", dcID, session.DcID)
+	log.Info("making new connection to DC %d (current: %d)", dcID, session.DcID)
 	isOnSameDC := session.DcID == dcID
 	encrIsReady := isOnSameDC
 	session.DcID = dcID
@@ -422,11 +383,9 @@ func (m *MTProto) NewConnection(dcID int32) (*MTProto, error) {
 		return nil, merry.Errorf("unable find address for DC #%d", dcID)
 	}
 
-	newMT := NewMTProtoExt(MTParams{
+	newMT := NewMTProto(MTParams{
 		AppConfig:  m.appCfg,
-		SessStore:  &SessNoopStore{},
 		Session:    session,
-		LogHandler: m.log,
 		ConnDialer: m.connDialer,
 	})
 	if err := newMT.InitSession(encrIsReady); err != nil {
@@ -472,7 +431,7 @@ func (m *MTProto) SendSyncRetry(
 		res := m.SendSync(msg)
 
 		if IsError(res, "RPC_CALL_FAIL") {
-			m.log.Warn("got RPC error, retrying in %s", failRetryInterval)
+			log.Warn("got RPC error, retrying in %s", failRetryInterval)
 			time.Sleep(failRetryInterval)
 			continue
 		}
@@ -484,67 +443,13 @@ func (m *MTProto) SendSyncRetry(
 			if floodWait > floodMaxWait {
 				return res
 			}
-			m.log.Warn("got flood-wait, retrying in %s, retry #%d of %d short",
+			log.Warn("got flood-wait, retrying in %s, retry #%d of %d short",
 				floodWait, retryNum, floodNumShortRetries)
 			time.Sleep(floodWait)
 			continue
 		}
 
 		return res
-	}
-}
-
-// Must be called only when sendRoutine and recvRoutine are stopped!
-func (m *MTProto) sendAndReadDirect(msg TLReq) (TL, error) {
-	resp := make(chan TL, 1)
-	packet := newPacket(msg, resp)
-	err := m.send(packet)
-	if err != nil {
-		return nil, merry.Wrap(err)
-	}
-
-	// small local version or sendRoutine: just sends data and passes error (if any) outside
-	stopSend := make(chan struct{})
-	stopSendDone := make(chan struct{})
-	sendErr := make(chan error)
-	go func() {
-		for {
-			select {
-			case <-stopSend:
-				close(stopSendDone)
-				return
-			case x := <-m.sendQueue:
-				m.log.Debug("direct send: sending: %#v", x)
-				if err := m.send(x); err != nil {
-					sendErr <- err
-					return
-				}
-			}
-		}
-	}()
-	defer func() {
-		close(stopSend)
-		<-stopSendDone
-		m.log.Debug("direct send: done")
-	}()
-
-	// small version of readRoutine: just reads, processes and checks for error from sending
-	for {
-		data, err := m.read()
-		if err != nil {
-			m.clearPacketData(packet.msgID)
-			return nil, merry.Wrap(err)
-		}
-		m.process(m.msgId, m.seqNo, data, false)
-		select {
-		case res := <-resp:
-			return res, nil
-		case err := <-sendErr:
-			m.clearPacketData(packet.msgID)
-			return nil, err
-		default:
-			m.log.Debug("direct send: waiting for next packet")
-		}
 	}
 }
 
@@ -621,7 +526,6 @@ func (m *MTProto) Auth(authData AuthDataProvider) error {
 			if err := m.reconnect(newDc); err != nil {
 				return merry.Wrap(err)
 			}
-			//TODO: save session here?
 		default:
 			return WrongRespError(x)
 		}
@@ -651,7 +555,7 @@ func (m *MTProto) Auth(authData AuthDataProvider) error {
 			return merry.Errorf("unknown password algo %T, application update is maybe needed to log in",
 				accPasswd.CurrentAlgo)
 		}
-		passwdSRP, err := calcInputCheckPasswordSRP(algo, accPasswd, passwd, cryptoRand.Read, m.log.Debug)
+		passwdSRP, err := calcInputCheckPasswordSRP(algo, accPasswd, passwd, cryptoRand.Read, log.Debug)
 		if err != nil {
 			return merry.Wrap(err)
 		}
@@ -710,7 +614,6 @@ func (m *MTProto) AuthBot(authData AuthDataProvider, tokenList ...string) error 
 			if err := m.reconnect(newDc); err != nil {
 				return merry.Wrap(err)
 			}
-			//TODO: save session here?
 		default:
 			return WrongRespError(x)
 		}
@@ -729,7 +632,7 @@ func (m *MTProto) popPendingPacketsUnlocked() []*packetToSend {
 		packets = append(packets, packet)
 		msgs = append(msgs, packet.msg)
 	}
-	m.log.Debug("popped %d pending packet(s): %#v", len(packets), msgs)
+	log.Debug("popped %d pending packet(s): %#v", len(packets), msgs)
 	return packets
 }
 func (m *MTProto) popPendingPackets() []*packetToSend {
@@ -741,7 +644,7 @@ func (m *MTProto) pushPendingPacketsUnlocked(packets []*packetToSend) {
 	for _, packet := range packets {
 		m.sendQueue <- packet
 	}
-	m.log.Debug("pushed %d pending packet(s)", len(packets))
+	log.Debug("pushed %d pending packet(s)", len(packets))
 }
 func (m *MTProto) pushPendingPackets(packets []*packetToSend) {
 	m.mutex.Lock()
@@ -786,28 +689,9 @@ func (m *MTProto) GetContacts() error {
 	return nil
 }
 
-/*func (m *MTProto) SendMessage(user_id int32, msg string) error {
-	resp := make(chan TL, 1)
-	m.sendQueue <- packetToSend{
-		TL_messages_sendMessage{
-			TL_inputPeerContact{user_id},
-			msg,
-			rand.Int63(),
-		},
-		resp,
-	}
-	x := <-resp
-	_, ok := x.(TL_messages_sentMessage)
-	if !ok {
-		return merry.Errorf("RPC: %#v", x)
-	}
-
-	return nil
-}*/
-
 func (m *MTProto) pingRoutine() {
 	defer func() {
-		m.log.Debug("pingRoutine done")
+		log.Debug("pingRoutine done")
 		m.routinesWG.Done()
 	}()
 	for {
@@ -822,7 +706,7 @@ func (m *MTProto) pingRoutine() {
 
 func (m *MTProto) sendRoutine() {
 	defer func() {
-		m.log.Debug("sendRoutine done")
+		log.Debug("sendRoutine done")
 		m.routinesWG.Done()
 	}()
 	for {
@@ -835,7 +719,7 @@ func (m *MTProto) sendRoutine() {
 				continue //closed connection, should receive stop signal now
 			}
 			if err != nil {
-				m.log.Error(err, "sending failed")
+				log.Error(err, "sending failed")
 				go m.reconnectLogged()
 				return
 			}
@@ -845,7 +729,7 @@ func (m *MTProto) sendRoutine() {
 
 func (m *MTProto) readRoutine() {
 	defer func() {
-		m.log.Debug("readRoutine done")
+		log.Debug("readRoutine done")
 		m.routinesWG.Done()
 	}()
 	for {
@@ -860,7 +744,7 @@ func (m *MTProto) readRoutine() {
 			continue //closed connection, should receive stop signal now
 		}
 		if err != nil {
-			m.log.Error(err, "reading failed")
+			log.Error(err, "reading failed")
 			go m.reconnectLogged()
 			return
 		}
@@ -870,7 +754,7 @@ func (m *MTProto) readRoutine() {
 
 func (m *MTProto) queueTransferRoutine() {
 	defer func() {
-		m.log.Debug("queueTransferRoutine done")
+		log.Debug("queueTransferRoutine done")
 		m.routinesWG.Done()
 	}()
 	for {
@@ -900,12 +784,12 @@ func (m *MTProto) debugRoutine() {
 		for id := range m.msgsByID {
 			delta := time.Now().Unix() - (id >> 32)
 			if delta > 5 {
-				m.log.Warn("msgsByID: #%d: is here for %ds", id, delta)
+				log.Warn("msgsByID: #%d: is here for %ds", id, delta)
 			}
 			count++
 		}
 		m.mutex.Unlock()
-		m.log.Debug("msgsByID: %d total", count)
+		log.Debug("msgsByID: %d total", count)
 		time.Sleep(5 * time.Second)
 	}
 }
@@ -926,7 +810,7 @@ func (m *MTProto) respAndClearPacketData(msgID int64, response TL) {
 	packet, ok := m.msgsByID[msgID]
 	if ok {
 		if packet.resp == nil {
-			m.log.Warn("second response to message #%d %#v", msgID, packet.msg)
+			log.Warn("second response to message #%d %#v", msgID, packet.msg)
 		} else {
 			packet.resp <- response
 			close(packet.resp)
@@ -946,7 +830,6 @@ func (m *MTProto) process(msgId int64, seqNo int32, dataTL TL, mayPassToHandler 
 
 	case TL_bad_server_salt:
 		m.session.ServerSalt = data.NewServerSalt
-		m.SaveSessionLogged()
 		m.resendPendingPackets()
 
 	case TL_bad_msg_notification:
@@ -957,13 +840,12 @@ func (m *MTProto) process(msgId int64, seqNo int32, dataTL TL, mayPassToHandler 
 
 	case TL_new_session_created:
 		m.session.ServerSalt = data.ServerSalt
-		m.SaveSessionLogged()
 
 	case TL_ping:
 		m.sendQueue <- newPacket(TL_pong{msgId, data.PingID}, nil)
 
 	case TL_pong:
-		// (ignore) TODO
+		// (ignore)
 
 	case TL_msgs_ack:
 		m.mutex.Lock()
