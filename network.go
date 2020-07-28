@@ -201,7 +201,7 @@ func (m *MTProto) makeAuthKey() error {
 
 	// (send) req_pq
 	nonceFirst := GenerateNonce(16)
-	err = m.justSend(TL_req_pq{nonceFirst})
+	err = m.justSend(TL_req_pq_multi{nonceFirst})
 	if err != nil {
 		return merry.Wrap(err)
 	}
@@ -233,7 +233,7 @@ func (m *MTProto) makeAuthKey() error {
 	p, q := splitPQ(str2big(res.Pq))
 	nonceSecond := GenerateNonce(32)
 	nonceServer := res.ServerNonce
-	innerData1 := (TL_p_q_inner_data{res.Pq, big2str(p), big2str(q), nonceFirst, nonceServer, nonceSecond}).encode()
+	innerData1 := (TL_p_q_inner_data_dc{res.Pq, big2str(p), big2str(q), nonceFirst, nonceServer, nonceSecond, m.session.DcID}).encode()
 
 	x = make([]byte, 255)
 	copy(x[0:], sha1(innerData1))

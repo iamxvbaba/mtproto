@@ -2,7 +2,9 @@
 
 Golang MTProto client (with personalized modification)
 
-TL layer: 114
+TL layer: 116
+
+Ref: https://github.com/tdlib/td/commit/5b69e72b097573bda599ff040616eb735d2a2888
 
 ## Information
 

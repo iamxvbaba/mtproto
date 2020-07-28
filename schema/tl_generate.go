@@ -154,6 +154,7 @@ func parseTLSchema(data []byte) []*Combinator {
 
 	lineRegexp := regexp.MustCompile(`^(.*?)(#[a-f0-9]*)? (.*)= (.*);$`)
 	fieldRegexp := regexp.MustCompile(`^(.*?):(.*)$`)
+	total := 0
 	for lineNum, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "//") {
@@ -181,6 +182,7 @@ func parseTLSchema(data []byte) []*Combinator {
 		name := normalizeName(match[2])
 		fieldsStr := strings.TrimSpace(match[3])
 		typeName := strings.TrimSpace(match[4])
+		total += 1
 
 		// making combinator description string (without id) and checking it's crc32
 		descr := makeCombinatorDescription(id, fieldsStr, typeName)
@@ -214,6 +216,7 @@ func parseTLSchema(data []byte) []*Combinator {
 
 		combinators = append(combinators, &Combinator{id, name, fields, typeName, isFunction})
 	}
+	print("Parsed: ", total)
 	return combinators
 }
 
