@@ -132,7 +132,7 @@ func NewMTProto(params MTParams) *MTProto {
 }
 
 func (m *MTProto) InitSessAndConnect() error {
-	if err := m.InitSession(false); err != nil {
+	if err := m.InitSession(true); err != nil {
 		return merry.Wrap(err)
 	}
 	if err := m.Connect(); err != nil {
