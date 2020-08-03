@@ -147,7 +147,7 @@ func (m *MTProto) InitSession(sessEncrIsReady bool) error {
 	} else {
 		m.encryptionReady = false
 		// Create New Session
-		m.session = &Session{Addr: "149.154.167.50:443"}
+		m.session = &Session{Addr: "127.0.0.1:443"}
 	}
 
 	rand.Seed(time.Now().UnixNano())

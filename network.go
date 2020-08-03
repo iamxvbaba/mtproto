@@ -115,6 +115,8 @@ func (m *MTProto) read() (TL, error) {
 		size = (int(b[0]) | int(b[1])<<8 | int(b[2])<<16) << 2
 	}
 
+	fmt.Println("size:",size)
+
 	left := size
 	buf := make([]byte, size)
 	for left > 0 {
@@ -130,8 +132,8 @@ func (m *MTProto) read() (TL, error) {
 	}
 
 	dbuf := NewDecodeBuf(buf)
-
 	authKeyHash := dbuf.Bytes(8)
+
 	if binary.LittleEndian.Uint64(authKeyHash) == 0 {
 		m.msgId = dbuf.Long()
 		messageLen := dbuf.Int()
@@ -215,6 +217,10 @@ func (m *MTProto) makeAuthKey() error {
 	if !ok {
 		return merry.Errorf("Handshake: Need resPQ, got %#v", data)
 	}
+	fmt.Println("back TL_resPQ")
+
+
+
 	if !bytes.Equal(nonceFirst, res.Nonce) {
 		return merry.New("Handshake: Wrong nonce")
 	}
